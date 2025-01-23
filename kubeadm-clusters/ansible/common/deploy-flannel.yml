@@ -1,0 +1,26 @@
+- hosts: master
+  become: true
+  vars:
+    pod_network_cidr: "10.245.0.0/16"
+    pod_subnet: "10.245.0.1/24"
+    service_network_cidr: "10.97.0.0/16"
+  tasks:
+        - name: Upload kube-flannel.yaml into master node
+          copy:
+            src: "{{ ansible_dir }}/resources/kube-flannel.yml"
+            dest: /tmp/kube-flannel.yml
+          tags:
+            - flannel
+          
+        - name: Update pod network cidr
+          shell: sed 's/10.244.0.0\/16/{{ pod_network_cidr | replace("/","\/") }}/g' /tmp/kube-flannel.yml > /tmp/kube-flannel-update.yml
+          args:
+            creates: /tmp/kube-flannel-update.yml
+          tags:
+            - flannel
+
+        - name: Deploy network plugin
+          become_user: ansible
+          command: kubectl apply -f /tmp/kube-flannel-update.yml
+          tags:
+            - flannel

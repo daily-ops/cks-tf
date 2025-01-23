@@ -1,0 +1,29 @@
+- hosts: localhost
+  become: true
+  tasks:
+        - name: Install nginx-ingress
+          become_user: ansible
+          command: kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.12.0/deploy/static/provider/baremetal/deploy.yaml
+          # command: helm upgrade --install ingress-nginx ingress-nginx   --repo https://kubernetes.github.io/ingress-nginx   --namespace ingress-nginx --create-namespace
+          # command: kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.12.0/deploy/static/provider/cloud/deploy.yaml
+          tags:
+            - ingress
+
+        - name: Install metallb
+          become_user: ansible
+          command: kubectl apply -f "{{ ansible_dir }}/resources/metallb-native.yaml"
+          tags:
+            - ingress
+        # Should be using wait here...
+        - name: Install metallb (delayed)
+          become_user: ansible
+          # command: kubectl rollout status deployment controller -n metallb-system
+          command: sleep 300
+          tags:
+            - ingress
+
+        - name: Install metallb IP pool
+          become_user: ansible
+          command: kubectl apply -f "{{ ansible_dir }}/resources/metallb-ip-pool.yaml"
+          tags:
+            - ingress

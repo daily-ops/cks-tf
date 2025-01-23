@@ -1,0 +1,24 @@
+- hosts: master
+  become: yes
+  tasks:
+        - name: Extract join command
+          shell: kubeadm token create --print-join-command
+          register: join_command
+          tags:
+            - join_cluster
+        
+        - name: "Add K8S join command to a dummy host"
+          add_host:
+            name:   "K8S_JOIN_COMMAND_HOLDER"
+            join_command:  "{{ join_command.stdout }}"
+          tags:
+            - join_cluster
+
+- hosts: workers
+  become: yes
+  tasks:
+
+        - name: Joining kube cluster
+          shell: '{{ hostvars["K8S_JOIN_COMMAND_HOLDER"]["join_command"] }}'
+          tags:
+            - join_cluster

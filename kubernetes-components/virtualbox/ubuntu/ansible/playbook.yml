@@ -1,0 +1,163 @@
+---
+- hosts: all
+  become: true
+  tasks:
+    - name: Set architecture specific variables
+      set_fact:
+        arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+
+    - name: Manage kubeadm repository
+      block:
+          # To be removed if the setup is done through pre-configured image
+        - name: kubeadm repository keyring
+          ansible.builtin.get_url:
+            url: https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key
+            dest: /usr/share/keyrings/kubeadm-archive-keyring.gpg.armored
+
+          # To be removed if the setup is done through pre-configured image
+        - name: De-Armor kubeadm GPG key
+          shell: gpg --dearmor < /usr/share/keyrings/kubeadm-archive-keyring.gpg.armored > /usr/share/keyrings/kubeadm-archive-keyring.gpg
+          args:
+              creates: /usr/share/keyrings/kubeadm-archive-keyring.gpg
+
+          # To be removed if the setup is done through pre-configured image
+        - name: kubeadm repository
+          ansible.builtin.apt_repository:
+            repo: "deb [arch={{arch}} signed-by=/usr/share/keyrings/kubeadm-archive-keyring.gpg]  https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /"
+            state: present
+            filename: kubeadm
+            update_cache: false
+
+          # To be removed if the setup is done through pre-configured image
+        - name: Install kubeadm
+          apt:
+            name: "{{ packages }}"
+            state: present
+            update_cache: true
+          vars:
+            packages:
+              - kubeadm
+              - kubelet
+              - containerd
+
+          # To be removed if the setup is done through pre-configured image
+        - name: Containerd directory
+          file: 
+            path: /etc/containerd
+            state: directory
+
+          # To be removed if the setup is done through pre-configured image
+        - name: Generate containerd config file
+          shell: containerd config default | sed 's/SystemdCgroup = false/SystemdCgroup = true/' | tee /etc/containerd/config.toml
+          args:
+            creates: /etc/containerd/config.toml
+
+          # To be removed if the setup is done through pre-configured image
+        - name: Restart containerd
+          command: systemctl restart containerd
+
+          # To be removed if the setup is done through pre-configured image
+        - name: Vault directory
+          file: 
+            path: /var/data/vault/storage
+            state: directory
+            owner: 100
+            group: 1000
+
+          # To be removed if the setup is done through pre-configured image
+        - name: Vault directory
+          file: 
+            path: /var/data/vault/audit
+            state: directory
+            owner: 100
+            group: 1000
+          
+- hosts: master
+  become: true
+  vars:
+    pod_network_cidr: "10.245.0.0/16"
+    pod_subnet: "10.245.0.1/24"
+    service_network_cidr: "10.97.0.0/16"
+  tasks:
+        # To be removed if the setup is done through pre-configured image
+        - name: Install kubectl
+          apt:
+            name: "{{ packages }}"
+            state: present
+            update_cache: true
+          vars:
+            packages:
+              - kubectl
+
+        - name: Initialize kube cluster
+          shell: kubeadm init --v=5 --apiserver-advertise-address {{ ansible_ssh_host }} --service-cidr {{ service_network_cidr }} --pod-network-cidr "{{ pod_network_cidr }}" --upload-certs | tee /var/log/kube-init.log
+          args:
+            creates: /etc/kubernetes/manifests/kube-apiserver.yaml
+
+        - name: Configure kubectl configuration
+          become_user: ansible
+          shell: |
+            mkdir -p $HOME/.kube
+            sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+            sudo chown $(id -u):$(id -g) $HOME/.kube/config
+            exit 0
+          args:
+            creates: $HOME/.kube/config
+
+        - name: Register kube_admin_config
+          slurp:
+              src: /etc/kubernetes/admin.conf
+          register: kube_admin_config
+
+        - name: Set fact kube_admin_config
+          set_fact:
+            kube_admin_config: "{{ kube_admin_config }}"
+
+        - name: Register kube_ca
+          slurp:
+              src: /etc/kubernetes/pki/ca.crt
+          register: kube_ca
+
+        - name: Set fact kube_ca
+          set_fact:
+            kube_ca: "{{ kube_ca }}"
+
+        - name: Upload kube-flannel.yaml into master node
+          copy:
+            src: "{{ repo_root }}/ubuntu/ansible/kube-flannel.yml"
+            dest: /tmp/kube-flannel.yml
+
+        - name: Update pod network cidr
+          shell: sed 's/10.244.0.0\/16/{{ pod_network_cidr | replace("/","\/") }}/g' /tmp/kube-flannel.yml > /tmp/kube-flannel-update.yml
+          args:
+            creates: /tmp/kube-flannel-update.yml
+
+        - name: Deploy network plugin
+          become_user: ansible
+          command: kubectl apply -f /tmp/kube-flannel-update.yml
+
+- hosts: localhost
+  tasks:
+        - name: create admin config
+          copy:
+            dest: "/home/ansible/.kube/config"
+            content: |
+              {{ hostvars[groups['master'][0]]['kube_admin_config'].content | b64decode }}
+
+        - name: Adding kubernetes ca
+          become: true
+          copy:
+            dest: "/usr/local/share/ca-certificates/extra/kubernetes-ca.crt"
+            content: |
+              {{ hostvars[groups['master'][0]]['kube_ca'].content | b64decode }}
+
+        - name: Upate local certificate registry
+          become: true
+          command: update-ca-certificates
+
+        - name: Replace a kubernetes host entry if required
+          become: true
+          lineinfile:
+            path: /etc/hosts
+            regexp: 'kubernetes'
+            line: "{{ groups['master'][0] }} kubernetes"

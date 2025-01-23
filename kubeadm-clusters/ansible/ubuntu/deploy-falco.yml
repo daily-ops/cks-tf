@@ -1,0 +1,57 @@
+- hosts: all
+  become: true
+  tasks:
+  - name: Set architecture specific variables
+    set_fact:
+      arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+    tags:
+      - falco
+
+  - name: falco repository keyring
+    ansible.builtin.get_url:
+      url: https://falco.org/repo/falcosecurity-packages.asc
+      dest: /usr/share/keyrings/falco-archive-keyring.gpg.armored
+    tags:
+      - falco
+
+  - name: De-Armor falco GPG key
+    shell: gpg --dearmor < /usr/share/keyrings/falco-archive-keyring.gpg.armored > /usr/share/keyrings/falco-archive-keyring.gpg
+    args:
+        creates: /usr/share/keyrings/falco-archive-keyring.gpg
+    tags:
+      - falco
+
+  - name: falco repository keyring
+    ansible.builtin.get_url:
+      url: https://falco.org/repo/falcosecurity-packages.asc
+      dest: /usr/share/keyrings/falco-archive-keyring.gpg.armored
+    tags:
+      - falco
+
+  - name: De-Armor falco GPG key
+    shell: gpg --dearmor < /usr/share/keyrings/falco-archive-keyring.gpg.armored > /usr/share/keyrings/falco-archive-keyring.gpg
+    args:
+        creates: /usr/share/keyrings/falco-archive-keyring.gpg
+    tags:
+      - falco
+
+  - name: Adding falco repository
+    ansible.builtin.apt_repository:
+      repo: "deb [arch={{arch}} signed-by=/usr/share/keyrings/falco-archive-keyring.gpg]  https://download.falco.org/packages/deb stable main"
+      state: present
+      filename: falcosecurity
+      update_cache: false
+    tags:
+      - falco
+
+  - name: Install falco
+    apt:
+      name: "{{ packages }}"
+      state: present
+      update_cache: true
+      force: true
+    vars:
+      packages:
+      - falco=0.39.2
+    tags:
+      - falco

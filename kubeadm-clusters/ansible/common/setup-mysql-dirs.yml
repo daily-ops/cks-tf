@@ -1,0 +1,44 @@
+- hosts: workers
+  become: yes
+  tasks:
+        - name: Data directory
+          file: 
+            path: /data
+            owner: 1001
+            group: 1001
+            mode: 0700
+            state: directory
+        - name: Init directory
+          file: 
+            path: /init
+            owner: 1001
+            group: 1001
+            mode: 0700
+            state: directory
+        - name: Install acl package
+          apt:
+            name: acl
+            state: present
+            update_cache: true
+        - name: ACL
+          acl:
+            etype: user
+            path: /init
+            recursive: true
+            entity: ansible
+            permissions: rwx
+            state: present
+        - name: Mysql init script
+          copy:
+            src: "{{ repo_root }}/apps/mysql/init/setup.sql"
+            dest: /init/setup.sql
+
+- hosts: master
+  become: true
+  tasks:
+  - name: Install mysql-client-core
+    apt:
+      name: mysql-client-core-8.0
+      state: present
+      update_cache: true
+      force: true

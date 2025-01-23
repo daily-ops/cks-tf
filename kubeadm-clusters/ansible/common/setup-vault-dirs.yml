@@ -1,0 +1,17 @@
+- hosts: workers
+  become: yes
+  tasks:          # To be removed if the setup is done through pre-configured image
+        - name: Vault directory
+          file: 
+            path: /var/data/vault/storage
+            state: directory
+            owner: 100
+            group: 1000
+
+          # To be removed if the setup is done through pre-configured image
+        - name: Vault directory
+          file: 
+            path: /var/data/vault/audit
+            state: directory
+            owner: 100
+            group: 1000

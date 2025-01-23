@@ -1,0 +1,28 @@
+- hosts: master
+  become: true
+  tasks:
+        - name: Upload calico operator into master node
+          copy:
+            src: "{{ ansible_dir }}/resources/calico-tigera-operator.yaml"
+            dest: /tmp/tigera-operator.yaml
+          tags:
+            - calico
+          
+        - name: Deploy network plugin
+          become_user: ansible
+          command: kubectl create -f /tmp/tigera-operator.yaml
+          tags:
+            - calico
+
+        - name: Upload calico operator into master node
+          copy:
+            src: "{{ ansible_dir }}/resources/calico-custom-resources.yaml"
+            dest: /tmp/custom-resources.yaml
+          tags:
+            - calico
+          
+        - name: Configure calico with custom resources
+          become_user: ansible
+          command: kubectl create -f /tmp/custom-resources.yaml
+          tags:
+            - calico

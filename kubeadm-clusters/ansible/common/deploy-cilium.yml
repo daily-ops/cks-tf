@@ -1,0 +1,22 @@
+- hosts: localhost
+  become: true
+  tasks:
+        - name: Add cilium helm repo
+          become_user: ansible
+          command: helm repo add cilium https://helm.cilium.io --force-update
+          tags:
+            - cilium
+
+        - name: Create ipsec keys 
+          become_user: ansible
+          shell: echo "Nothing"
+          # shell:  kubectl delete -n kube-system secret cilium-ipsec-keys; kubectl create -n kube-system secret generic cilium-ipsec-keys --from-literal=keys="3+ rfc4106(gcm(aes)) $(echo $(dd if=/dev/urandom count=20 bs=1 2> /dev/null | xxd -p -c 64)) 128"
+          tags:
+            - cilium
+
+        - name: Install cilium
+          become_user: ansible
+          command: helm install cilium cilium/cilium --namespace=kube-system 
+          # command: helm install cilium cilium/cilium --namespace=kube-system --set encryption.enabled=true --set encryption.type=ipsec --set encryption.ipsec.interface=enp0s8
+          tags:
+            - cilium

@@ -1,0 +1,387 @@
+# -*- mode: ruby -*-
+# vi:set ft=ruby sw=2 ts=2 sts=2:
+
+# Set the build mode
+# "BRIDGE" - Places VMs on your local network so cluster can be accessed from browser.
+#            You must have enough spare IPs on your network for the cluster nodes.
+# "NAT"    - Places VMs in a private virtual network. Cluster cannot be accessed
+#            without setting up a port forwarding rule for every NodePort exposed.
+#            Use this mode if for some reason BRIDGE doesn't work for you.
+BUILD_MODE = "BRIDGE"
+
+# Define the number of worker nodes
+# If this number is changed, remember to update setup-hosts.sh script with the new hosts IP details in /etc/hosts of each VM.
+
+NUM_WORKER_NODES = ENV.fetch('NUM_WORKER_NODES', 2).to_i
+
+# Network parameters for NAT mode, the BRIDGE mode will use DHCP
+IP_NW = "192.168.56"
+GATEWAY = 1
+MASTER_IP_START = 200
+NODE_IP_START = 201
+WORKSTATION_IP = 100
+
+# Host operating sysem detection
+module OS
+  def OS.windows?
+    (/cygwin|mswin|mingw|bccwin|wince|emx/ =~ RUBY_PLATFORM) != nil
+  end
+
+  def OS.mac?
+    (/darwin/ =~ RUBY_PLATFORM) != nil
+  end
+
+  def OS.unix?
+    !OS.windows?
+  end
+
+  def OS.linux?
+    OS.unix? and not OS.mac?
+  end
+
+  def OS.jruby?
+    RUBY_ENGINE == "jruby"
+  end
+end
+
+# Determine host adpater for bridging in BRIDGE mode
+def get_bridge_adapter()
+  if OS.windows?
+    return %x{powershell -Command "Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Get-NetAdapter | Select-Object -ExpandProperty InterfaceDescription"}.chomp
+  elsif OS.linux?
+    return %x{ip route | grep default | awk '{ print $5 }' | grep -v -e "^wl"}.chomp
+  elsif OS.mac?
+    return %x{mac/mac-bridge.sh}.chomp
+  end
+end
+
+# Helper method to get the machine ID of a node.
+# This will only be present if the node has been
+# created in VirtualBox.
+def get_machine_id(vm_name)
+  machine_id_filepath = "#{ENV.fetch('VAGRANT_CWD','.')}/.vagrant/machines/#{vm_name}/virtualbox/id"
+  if not File.exist? machine_id_filepath
+    return nil
+  else
+    return File.read(machine_id_filepath)
+  end
+end
+
+# Helper method to determine whether all nodes are up
+def all_nodes_up()
+  if get_machine_id("controlplane").nil?
+    puts "Node controlplane is not up"
+    return false
+  end
+
+  (1..NUM_WORKER_NODES).each do |i|
+    if get_machine_id("node0#{i}").nil?
+      puts "Node node0#{i} is not up"
+      return false
+    end
+  end
+  return true
+end
+
+# Sets up hosts file and DNS
+def setup_dns(node)
+  # Set up /etc/hosts
+  node.vm.provision "setup-hosts", :type => "shell", :path => "#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/setup-hosts.sh" do |s|
+    s.args = [IP_NW, BUILD_MODE, NUM_WORKER_NODES, MASTER_IP_START, NODE_IP_START]
+  end
+  # Set up DNS resolution
+  node.vm.provision "setup-dns", type: "shell", :path => "#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/update-dns.sh"
+end
+
+# Runs provisioning steps that are required by masters and workers
+def provision_kubernetes_node(node)
+  # Set up DNS
+  setup_dns node
+  # Set up ssh
+  node.vm.provision "setup-ssh", :type => "shell", :path => "#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/setup-sshd.sh"
+end
+
+# def clean_workspace()
+#   # system("rm -f /var/tmp/controlplane-ip.out")
+#   # system("rm -f /var/tmp/workstation-ip")
+#   system("rm -f /var/tmp/hosts.tmp")
+#   system("rm -f /var/tmp/known_hosts")
+#   # (1..NUM_WORKER_NODES).each do |i|
+#   #   system("rm -f node0#{i}-ip")
+#   # end
+# end
+
+
+
+# All Vagrant configuration is done below. The "2" in Vagrant.configure
+# configures the configuration version (we support older styles for
+# backwards compatibility). Please don't change it unless you know what
+# you're doing.
+Vagrant.configure("2") do |config|
+  # The most common configuration options are documented and commented below.
+  # For a complete reference, please see the online documentation at
+  # https://docs.vagrantup.com.
+
+  # Every Vagrant development environment requires a box. You can search for
+  # boxes at https://vagrantcloud.com/search.
+  # config.vm.box = "base"
+
+
+  config.vm.box = "ubuntu/jammy64"
+  config.vm.boot_timeout = 900
+
+
+  # Disable automatic box update checking. If you disable this, then
+  # boxes will only be checked for updates when the user runs
+  # `vagrant box outdated`. This is not recommended.
+  config.vm.box_check_update = false
+
+  
+  # Provision Master Nodes
+  config.vm.define "workstation" do |node|
+    # Name shown in the GUI
+    node.vm.provider "virtualbox" do |vb|
+      vb.name = "workstation"
+      vb.memory = 3072
+      vb.cpus = 3
+    end
+    node.vm.hostname = "workstation"
+    if BUILD_MODE == "BRIDGE"
+
+      adapter = ""
+      node.vm.network :public_network, bridge: get_bridge_adapter(), use_dhcp_assigned_default_route: true
+      # node.vm.provision "shell", inline: "ip route delete default dev enp0s3"
+    else
+      node.vm.network :private_network, ip: IP_NW + ".#{WORKSTATION_IP}"
+      node.vm.network "forwarded_port", guest: 22, host: "#{2700}"
+    end
+    provision_kubernetes_node node
+    node.vm.provision "file", source: "#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/vimrc", destination: "$HOME/.vimrc"
+
+    node.vm.provision "shell", inline: "userdel ansible; useradd -s /bin/bash -m ansible"
+    node.vm.provision "file", source: "~/.ssh/id_rsa.pub", destination: "/var/tmp/authorized_keys"
+    node.vm.provision "file", source: "~/.ssh/id_rsa", destination: "/var/tmp/id_rsa"
+    node.vm.provision "shell", inline: "mkdir -p /home/ansible/.ssh && mv /var/tmp/authorized_keys /home/ansible/.ssh/ && mv /var/tmp/id_rsa /home/ansible/.ssh/ && chown -R ansible:ansible /home/ansible/.ssh/*"
+    node.vm.provision :shell do |s|
+      s.path = "#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/setup-ansible.sh"
+    end
+    node.vm.provision :shell do |s|
+      s.path = "#{ENV.fetch('VAGRANT_CWD','.')}/common/hack-systemd-default-route.sh"
+    end
+
+    node.vm.provision :shell do |s|
+      s.path = "#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/setup-kernel.sh"
+    end
+  end
+
+  # Provision Master Nodes
+  config.vm.define "controlplane" do |node|
+    # Name shown in the GUI
+    node.vm.provider "virtualbox" do |vb|
+      vb.name = "controlplane"
+      vb.memory = 2048
+      vb.cpus = 4
+    end
+    node.vm.hostname = "controlplane"
+    if BUILD_MODE == "BRIDGE"
+
+      adapter = ""
+      node.vm.network :public_network, bridge: get_bridge_adapter(), use_dhcp_assigned_default_route: true
+      # node.vm.provision "shell", inline: "ip route delete default dev enp0s3"
+    else
+      node.vm.network :private_network, ip: IP_NW + ".#{MASTER_IP_START}"
+      node.vm.network "forwarded_port", guest: 22, host: "#{2710}"
+    end
+    provision_kubernetes_node node
+    node.vm.provision "file", source: "#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/vimrc", destination: "$HOME/.vimrc"
+
+    if BUILD_MODE == "BRIDGE"
+      node.vm.provision "shell", inline: "userdel ansible; useradd -s /bin/bash -m ansible > /dev/null 2>&1"
+      node.vm.provision "file", source: "~/.ssh/id_rsa.pub", destination: "/tmp/authorized_keys"
+      node.vm.provision "shell", inline: "mkdir -p /home/ansible/.ssh && mv /tmp/authorized_keys /home/ansible/.ssh/ && chown ansible:ansible /home/ansible/.ssh/authorized_keys"
+      node.vm.provision :shell do |s|
+        s.path = "#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/setup-ansible.sh"
+      end
+      node.vm.provision :shell do |s|
+        # s.path = "#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/setup-ansible.sh"
+        s.path = "#{ENV.fetch('VAGRANT_CWD','.')}/common/hack-systemd-default-route.sh"
+      end
+    end
+    node.vm.provision :shell do |s|
+      s.path = "#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/setup-kernel.sh"
+    end
+  end
+
+
+  # Provision Worker Nodes
+  (1..NUM_WORKER_NODES).each do |i|
+    config.vm.define "node0#{i}" do |node|
+      node.vm.provider "virtualbox" do |vb|
+        vb.name = "node0#{i}"
+        vb.memory = 3072
+        vb.cpus = 3
+      end
+      node.vm.hostname = "node0#{i}"
+
+      if BUILD_MODE == "BRIDGE"
+        node.vm.network :public_network, bridge: get_bridge_adapter(), use_dhcp_assigned_default_route: true
+        # node.vm.provision "shell", inline: "ip route delete default dev enp0s3"
+      else
+        node.vm.network :private_network, ip: IP_NW + ".#{NODE_IP_START + i}"
+        node.vm.network "forwarded_port", guest: 22, host: "#{2720 + i}"
+      end
+      provision_kubernetes_node node
+
+      if BUILD_MODE == "BRIDGE"
+        node.vm.provision "shell", inline: "userdel ansible; useradd -s /bin/bash -m ansible > /dev/null 2>&1"
+        node.vm.provision "file", source: "~/.ssh/id_rsa.pub", destination: "/tmp/authorized_keys"
+        node.vm.provision "shell", inline: "mkdir -p /home/ansible/.ssh && mv /tmp/authorized_keys /home/ansible/.ssh/ && chown ansible:ansible /home/ansible/.ssh/authorized_keys"
+        node.vm.provision :shell do |s|
+          s.path = "#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/setup-ansible.sh"
+        end
+        node.vm.provision :shell do |s|
+          # s.path = "#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/setup-ansible.sh"
+          s.path = "#{ENV.fetch('VAGRANT_CWD','.')}/common/hack-systemd-default-route.sh"
+        end
+      end
+      node.vm.provision :shell do |s|
+        s.path = "#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/setup-kernel.sh"
+      end
+
+    end
+  end
+
+  if BUILD_MODE == "BRIDGE"
+    # Trigger that fires after each VM starts.
+    # Does nothing until all the VMs have started, at which point it
+    # gathers the IP addresses assigned to the bridge interfaces by DHCP
+    # and pushes a hosts file to each node with these IPs.
+    config.trigger.after :up do |trigger|
+      trigger.name = "Post provisioner"
+      trigger.ignore = [:destroy, :halt]
+      trigger.ruby do |env, machine|
+        if all_nodes_up()
+          hosts = ""
+          puts "    Gathering IP addresses of nodes..."
+          # ips = []
+          nodes = []
+          nodes = ["controlplane"]
+          # nodes_group = ""
+          # nodes_group << "[master]" << "\n"
+          system("echo [master] > #{ENV.fetch('VAGRANT_CWD','.')}/../ansible/inventory")
+
+          system("vagrant ssh controlplane -c \"ip route | grep default | grep -Pv '10\.\d+\.\d+\.\d+' | cut -d' ' -f9\" > /var/tmp/controlplane-ip.out")	
+          # system("vagrant ssh node0#{i} -c \"ip route | grep default | grep -Pv '10\.\d+\.\d+\.\d+' | cut -d' ' -f9\" > /var/tmp/node0#{i}-ip.out")	
+          # system("echo [workstation] >> #{ENV.fetch('VAGRANT_CWD','.')}/../ansible/inventory")
+          system("cat /var/tmp/controlplane-ip.out >> #{ENV.fetch('VAGRANT_CWD','.')}/../ansible/inventory")
+          system("echo \"`cat /var/tmp/controlplane-ip.out | tr -d '\n' | tr -d '\r'` controlplane\"  | tee /var/tmp/hosts.tmp")
+          system("#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/known_hosts.sh /var/tmp/known_hosts `cat /var/tmp/controlplane-ip.out | tr -d \"\n\" | tr -d \"\r\"` controlplane")   
+
+          # File.open("/var/tmp/controlplane-ip.out", "r") do |file|
+          #   ip = file.read.chomp
+          #   hosts << ip << "  controlplane\n"                        
+          #   nodes_group << ip << "\n\n"
+          #   system("#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/known_hosts.sh /var/tmp/known_hosts #{ip} controlplane")
+          #   nodes = ["controlplane"]
+          # end
+          # File.delete("controlplane-ip.out")
+
+          # nodes_group << "[workers]" << "\n"
+          system("echo [workers] >> #{ENV.fetch('VAGRANT_CWD','.')}/../ansible/inventory")
+          (1..NUM_WORKER_NODES).each do |i|
+            system("vagrant ssh node0#{i} -c \"ip route | grep default | grep -Pv '10\.\d+\.\d+\.\d+' | cut -d' ' -f9\" > /var/tmp/node0#{i}-ip.out")	
+            # system("echo [workstation] >> #{ENV.fetch('VAGRANT_CWD','.')}/../ansible/inventory")
+            system("cat /var/tmp/node0#{i}-ip.out >> #{ENV.fetch('VAGRANT_CWD','.')}/../ansible/inventory")
+            system("echo `cat /var/tmp/node0#{i}-ip.out | tr -d \"\n\" | tr -d \"\r\"` node0#{i}  >> /var/tmp/hosts.tmp")
+            system("#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/known_hosts.sh /var/tmp/known_hosts `cat /var/tmp/node0#{i}-ip.out | tr -d \"\n\" | tr -d \"\r\"` node0#{i}")   
+            nodes.push("node0#{i}")
+            
+            # File.open("/var/tmp/node0#{i}-ip.out", "r") do |file| 
+            #   ip = file.read.chomp              
+            #   hosts << ip << "  node0#{i}\n"
+            #   nodes_group << ip << "\n"
+            #   system("#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/known_hosts.sh /var/tmp/known_hosts #{ip} node0#{i}")              
+            #   nodes.push("node0#{i}")
+            # end  
+            # File.delete("node0#{i}-ip")
+          end
+
+          system("vagrant ssh workstation -c \"ip route | grep default | grep -Pv '10\.\d+\.\d+\.\d+' | cut -d' ' -f9\" > /var/tmp/worktation-ip.out")	
+          system("echo [workstation] >> #{ENV.fetch('VAGRANT_CWD','.')}/../ansible/inventory")
+          system("cat /var/tmp/worktation-ip.out >> #{ENV.fetch('VAGRANT_CWD','.')}/../ansible/inventory")
+          system("echo `cat /var/tmp/workstation-ip.out | tr -d \"\n\" | tr -d \"\r\"` workstation  >> /var/tmp/hosts.tmp")
+          system("#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/known_hosts.sh /var/tmp/known_hosts `cat /var/tmp/worktation-ip.out | tr -d \"\n\" | tr -d \"\r\"` workstation")   
+          nodes.push("workstation")
+          # File.open("/var/tmp/workstation-ip.out", "r") do |file|
+          #   ip = file.read.chomp
+          #   nodes_group << "[workstation]" << "\n"
+          #   hosts << ip << "  workstation\n"
+          #   nodes_group << ip << "\n"
+          #   system("#{ENV.fetch('VAGRANT_CWD','.')}/ubuntu/vagrant/known_hosts.sh /var/tmp/known_hosts `cat /var/tmp/worktation-ip.out` workstation")              
+          #   nodes.push("workstation")
+          # end
+          # File.delete("workstation-ip")
+
+
+          # ips.push(IP_NW + ".#{MASTER_IP_START}")
+          # (1..NUM_WORKER_NODES).each do |i|
+          #   nodes.push("node0#{i}")
+          #   ips.push(IP_NW + ".#{NODE_IP_START + i}")
+          # end
+
+          # hosts = ""
+          # ips.each_with_index do |ip, i|
+          #   hosts << ip << "  " << nodes[i] << "\n"
+          # end
+          # puts "    Setting /etc/hosts on nodes..."
+          # File.open("/var/tmp/hosts.tmp", "w") { |file| file.write(hosts) }
+          nodes.each do |node|
+            system("vagrant upload /var/tmp/known_hosts /var/tmp/known_hosts #{node}")
+            system("vagrant ssh #{node} -c 'sudo rm -f /home/ansible/.ssh/known_hosts && sudo mv /var/tmp/known_hosts /home/ansible/.ssh/ && sudo chown -R ansible:ansible /home/ansible/.ssh/'")
+            system("vagrant upload /var/tmp/hosts.tmp /var/tmp/hosts.tmp #{node}")
+            system("vagrant ssh #{node} -c 'cat /var/tmp/hosts.tmp | sudo tee -a /etc/hosts'")
+            # system("vagrant upload #{ENV.fetch('VAGRANT_CWD','.')}/common/systemd-disable-default-route.service /var/tmp/systemd-disable-default-route.service #{node}")
+            
+            # system("vagrant ssh #{node} -c '\"echo * * * * * ip route delete default dev enp0s3\" | sudo tee /etc/cron.d/delete_default_route'")
+            # system("vagrant ssh #{node} -c 'sudo rm -f /etc/netplan/50-cloud-init.yaml'")
+          end
+          # File.delete("hosts.tmp")
+          # File.delete("/var/tmp/known_hosts")
+
+
+          # puts "Populate ansible inventory at ubuntu/ansible/inventory"
+          # nodes_group = ""
+          # nodes_group << "[master]" << "\n"
+
+          # tmp_ip = IP_NW + ".#{MASTER_IP_START}"
+          # nodes_group << IP_NW + ".#{MASTER_IP_START}" << "\n\n"
+
+          # nodes_group << "[workers]" << "\n"
+          # (1..NUM_WORKER_NODES).each do |i|
+          #   tmp_ip = IP_NW + ".#{NODE_IP_START + i}"
+          #   nodes_group << IP_NW + ".#{NODE_IP_START + i}" << "\n"
+          # end
+
+          # File.open("#{ENV.fetch('VAGRANT_CWD','.')}/../ansible/inventory", "w") { |file| file.write(nodes_group) }
+
+          puts "    You may now use the inventory to manage the boxes:"
+          puts "        ansible -i #{ENV.fetch('VAGRANT_CWD','.')}/../ansible/inventory -m ping all"
+          puts "        ansible -i #{ENV.fetch('VAGRANT_CWD','.')}/../ansible/inventory -m ping master"
+          puts "        ansible -i #{ENV.fetch('VAGRANT_CWD','.')}/../ansible/inventory -m ping workers"
+
+          puts <<~EOF
+
+                 VM build complete!
+
+               EOF
+        else
+          puts "    Nothing to do here"
+        end
+      end
+    end
+  end
+
+
+end
+
+# clean_workspace
